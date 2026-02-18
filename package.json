@@ -1,6 +1,7 @@
 {
-  "name": "@gentry-ai-bot/contentforge",
-  "version": "0.2.0",
+  "name": "contentforge-mcp",
+  "version": "0.2.1",
+  "mcpName": "io.github.gentry-ai-bot/contentforge",
   "description": "Content pipeline MCP server — topic research, image sourcing, SEO metadata, affiliate links, and CMS publishing",
   "type": "module",
   "main": "src/index.js",
@@ -44,7 +45,8 @@
     "node": ">=18.0.0"
   },
   "publishConfig": {
-    "registry": "https://npm.pkg.github.com"
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

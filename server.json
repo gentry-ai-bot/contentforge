@@ -1,0 +1,50 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.gentry-ai-bot/contentforge",
+  "description": "Content pipeline MCP server — image sourcing, SEO, affiliate links, and CMS publishing.",
+  "repository": {
+    "url": "https://github.com/gentry-ai-bot/contentforge",
+    "source": "github"
+  },
+  "version": "1.0.0",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "contentforge-mcp",
+      "version": "0.2.1",
+      "transport": {
+        "type": "stdio"
+      },
+      "environmentVariables": [
+        {
+          "description": "URL of your CMS API endpoint",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": false,
+          "name": "CONTENTFORGE_CMS_URL"
+        },
+        {
+          "description": "API key for your CMS",
+          "isRequired": true,
+          "format": "string",
+          "isSecret": true,
+          "name": "CONTENTFORGE_CMS_KEY"
+        },
+        {
+          "description": "Pexels API key for image sourcing",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": true,
+          "name": "CONTENTFORGE_PEXELS_KEY"
+        },
+        {
+          "description": "Amazon Associates affiliate tag",
+          "isRequired": false,
+          "format": "string",
+          "isSecret": false,
+          "name": "CONTENTFORGE_AMAZON_TAG"
+        }
+      ]
+    }
+  ]
+}
