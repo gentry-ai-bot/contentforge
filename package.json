@@ -1,6 +1,6 @@
 {
   "name": "@gentry-ai-bot/contentforge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Content pipeline MCP server — topic research, image sourcing, SEO metadata, affiliate links, and CMS publishing",
   "type": "module",
   "main": "src/index.js",

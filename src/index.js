@@ -108,6 +108,56 @@ function enrichAffiliateLinks(content, tag) {
   );
 }
 
+// ---- Content Brief Generation ----
+
+async function generateContentBrief(site, count = 5) {
+  // Get existing articles to avoid duplicates
+  const articles = await cmsRequest(`/api/articles?site=${site}&status=published&limit=200`);
+  const existingTitles = Array.isArray(articles) ? articles.map(a => a.title.toLowerCase()) : [];
+  const existingSlugs = Array.isArray(articles) ? articles.map(a => a.slug) : [];
+  const cats = await cmsRequest(`/api/categories?site=${site}`);
+  
+  // Analyze content distribution across categories
+  const catCounts = {};
+  if (Array.isArray(articles)) {
+    articles.forEach(a => {
+      const cat = a.category_name || 'uncategorized';
+      catCounts[cat] = (catCounts[cat] || 0) + 1;
+    });
+  }
+  
+  return {
+    site,
+    total_articles: Array.isArray(articles) ? articles.length : 0,
+    categories: Array.isArray(cats) ? cats.map(c => ({ name: c.name, slug: c.slug, article_count: catCounts[c.name] || 0 })) : [],
+    existing_titles: existingTitles.slice(0, 50),
+    content_distribution: catCounts,
+    suggestion: `Site has ${Array.isArray(articles) ? articles.length : 0} articles. Least-covered categories should be prioritized. Generate ${count} new article ideas that don't overlap with existing content.`,
+  };
+}
+
+async function getPortfolioStats() {
+  const sites = await cmsRequest('/api/sites');
+  const stats = [];
+  for (const site of (Array.isArray(sites) ? sites : [])) {
+    const articles = await cmsRequest(`/api/articles?site=${site.slug}&limit=1000`);
+    const published = Array.isArray(articles) ? articles.filter(a => a.status === 'published').length : 0;
+    const draft = Array.isArray(articles) ? articles.filter(a => a.status === 'draft').length : 0;
+    const cats = await cmsRequest(`/api/categories?site=${site.slug}`);
+    stats.push({
+      site: site.name, slug: site.slug, domain: site.domain,
+      published, draft, total: published + draft,
+      categories: Array.isArray(cats) ? cats.length : 0,
+    });
+  }
+  return {
+    total_sites: stats.length,
+    total_articles: stats.reduce((s, x) => s + x.total, 0),
+    total_published: stats.reduce((s, x) => s + x.published, 0),
+    sites: stats,
+  };
+}
+
 // ---- Tool Definitions ----
 
 const TOOLS = [
@@ -172,6 +222,51 @@ const TOOLS = [
         status: { type: 'string', enum: ['draft', 'published'], description: 'Status (default: published)' },
       },
       required: ['site', 'title', 'content'],
+    },
+  },
+  {
+    name: 'content_brief',
+    description: 'Generate a content brief for a site: analyzes existing content, identifies gaps, and provides data for planning new articles. Use this before writing to avoid duplicate topics.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site: { type: 'string', description: 'Site slug' },
+        count: { type: 'number', description: 'Number of article ideas to plan for (default 5)' },
+      },
+      required: ['site'],
+    },
+  },
+  {
+    name: 'portfolio_stats',
+    description: 'Get aggregate statistics across all sites in the CMS: article counts, category distribution, published vs draft.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'batch_publish',
+    description: 'Publish multiple articles to a site in one call. Each article needs title, content, and optionally category, tags, meta_description, featured_image.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        site: { type: 'string', description: 'Site slug' },
+        articles: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string' },
+              content: { type: 'string' },
+              category: { type: 'string' },
+              tags: { type: 'array', items: { type: 'string' } },
+              meta_description: { type: 'string' },
+              featured_image: { type: 'string' },
+              author: { type: 'string' },
+            },
+            required: ['title', 'content'],
+          },
+          description: 'Array of articles to publish',
+        },
+      },
+      required: ['site', 'articles'],
     },
   },
   {
@@ -257,6 +352,46 @@ async function handleTool(name, args) {
       });
       return { success: true, article };
     }
+    case 'content_brief':
+      return generateContentBrief(args.site, args.count || 5);
+    case 'portfolio_stats':
+      return getPortfolioStats();
+    case 'batch_publish': {
+      const sites = await cmsRequest('/api/sites');
+      const site = sites.find(s => s.slug === args.site);
+      if (!site) return { error: `Site "${args.site}" not found` };
+      const results = [];
+      for (const art of args.articles) {
+        try {
+          const slug = generateSlug(art.title);
+          const meta = art.meta_description || generateMetaDescription(art.title, art.content);
+          const content = enrichAffiliateLinks(art.content, AMAZON_TAG);
+          let categoryId = null;
+          if (art.category) {
+            const cats = await cmsRequest(`/api/categories?site=${args.site}`);
+            const cat = cats.find(c => c.name.toLowerCase() === art.category.toLowerCase());
+            if (cat) categoryId = cat.id;
+            else {
+              const newCat = await cmsRequest('/api/categories', {
+                method: 'POST', body: JSON.stringify({ site_id: site.id, name: art.category, slug: generateSlug(art.category) }),
+              });
+              categoryId = newCat.id;
+            }
+          }
+          const article = await cmsRequest('/api/articles', {
+            method: 'POST', body: JSON.stringify({
+              site_id: site.id, title: art.title, slug, content, category_id: categoryId,
+              tags: art.tags || [], meta_description: meta, featured_image: art.featured_image || '',
+              author: art.author || 'Editorial Team', status: 'published',
+            }),
+          });
+          results.push({ title: art.title, slug, success: true, id: article.id });
+        } catch (e) {
+          results.push({ title: art.title, success: false, error: e.message });
+        }
+      }
+      return { published: results.filter(r => r.success).length, failed: results.filter(r => !r.success).length, results };
+    }
     case 'get_existing_articles': {
       const articles = await cmsRequest(`/api/articles?site=${args.site}&limit=${args.limit || 50}`);
       if (!Array.isArray(articles)) return { error: 'Failed to fetch articles', raw: articles };
@@ -271,7 +406,7 @@ async function handleTool(name, args) {
 
 function createServer() {
   const srv = new Server(
-    { name: 'contentforge', version: '0.1.0' },
+    { name: 'contentforge', version: '0.2.0' },
     { capabilities: { tools: {} } }
   );
 
@@ -299,7 +434,7 @@ function startHttpServer() {
 
   // Health check (no auth)
   app.get('/health', (req, res) => {
-    res.json({ status: 'ok', server: 'contentforge', version: '0.1.0' });
+    res.json({ status: 'ok', server: 'contentforge', version: '0.2.0' });
   });
 
   // Auth middleware for MCP endpoints
