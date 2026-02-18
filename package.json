@@ -1,0 +1,19 @@
+{
+  "name": "contentforge",
+  "version": "0.1.0",
+  "description": "Content pipeline MCP server — topic to publish-ready article",
+  "type": "module",
+  "main": "src/index.js",
+  "bin": {
+    "contentforge": "./src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["mcp", "content", "seo", "publishing", "cms"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  }
+}
