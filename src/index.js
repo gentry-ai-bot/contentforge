@@ -2,33 +2,52 @@
 /**
  * ContentForge MCP Server
  * 
- * A content pipeline MCP server that helps AI agents create publish-ready articles.
- * 
- * Tools:
- *   - generate_article: Generate a full article from a topic + site context
- *   - source_images: Find relevant stock images for an article
- *   - enrich_links: Add affiliate links to product mentions
- *   - publish_article: Publish to a CMS endpoint
- *   - list_sites: List available sites and their categories
+ * Supports both stdio (--stdio flag) and HTTP/SSE transport.
+ * HTTP mode includes API key auth, rate limiting, and usage tracking.
  */
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-
-const server = new Server(
-  { name: 'contentforge', version: '0.1.0' },
-  { capabilities: { tools: {} } }
-);
+import express from 'express';
 
 // ---- Config from env ----
 const CMS_API_URL = process.env.CONTENTFORGE_CMS_URL || 'https://cms-api-production-ad22.up.railway.app';
 const CMS_API_KEY = process.env.CONTENTFORGE_CMS_KEY || '';
 const PEXELS_API_KEY = process.env.CONTENTFORGE_PEXELS_KEY || '';
 const AMAZON_TAG = process.env.CONTENTFORGE_AMAZON_TAG || 'pickwise05-20';
+const API_KEY = process.env.CONTENTFORGE_API_KEY || '';
+const PORT = parseInt(process.env.PORT || '3000', 10);
+
+// ---- Rate Limiting (in-memory) ----
+const rateLimits = new Map(); // key -> { count, resetAt }
+const RATE_LIMIT = 100;
+const RATE_WINDOW_MS = 60 * 60 * 1000; // 1 hour
+
+function checkRateLimit(apiKey) {
+  const now = Date.now();
+  let entry = rateLimits.get(apiKey);
+  if (!entry || now > entry.resetAt) {
+    entry = { count: 0, resetAt: now + RATE_WINDOW_MS };
+    rateLimits.set(apiKey, entry);
+  }
+  entry.count++;
+  return entry.count <= RATE_LIMIT;
+}
+
+// ---- Usage Tracking ----
+function logUsage(toolName, apiKey) {
+  console.log(JSON.stringify({
+    type: 'tool_call',
+    tool: toolName,
+    apiKey: apiKey ? apiKey.slice(0, 8) + '...' : 'stdio',
+    timestamp: new Date().toISOString(),
+  }));
+}
 
 // ---- Helpers ----
 
@@ -61,14 +80,10 @@ async function searchPexels(query, count = 3) {
 }
 
 function generateSlug(title) {
-  return title
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/^-|-$/g, '');
+  return title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 }
 
 function generateMetaDescription(title, content) {
-  // Take first ~155 chars of content, cleaned
   const clean = content.replace(/[#*_\[\]()]/g, '').replace(/\n+/g, ' ').trim();
   return clean.slice(0, 155).replace(/\s+\S*$/, '') + '...';
 }
@@ -82,15 +97,11 @@ function generateSchemaMarkup(article) {
     image: article.featured_image,
     author: { '@type': 'Person', name: article.author },
     datePublished: new Date().toISOString(),
-    publisher: {
-      '@type': 'Organization',
-      name: article.site_name || 'ContentForge',
-    },
+    publisher: { '@type': 'Organization', name: article.site_name || 'ContentForge' },
   };
 }
 
 function enrichAffiliateLinks(content, tag) {
-  // Find Amazon URLs without tags and add the affiliate tag
   return content.replace(
     /https:\/\/(?:www\.)?amazon\.com\/dp\/([A-Z0-9]{10})(?!\?tag=)/g,
     `https://www.amazon.com/dp/$1?tag=${tag}`
@@ -103,10 +114,7 @@ const TOOLS = [
   {
     name: 'list_sites',
     description: 'List all available sites and their categories from the CMS',
-    inputSchema: {
-      type: 'object',
-      properties: {},
-    },
+    inputSchema: { type: 'object', properties: {} },
   },
   {
     name: 'source_images',
@@ -122,7 +130,7 @@ const TOOLS = [
   },
   {
     name: 'enrich_links',
-    description: 'Scan article content for Amazon product URLs and add affiliate tags. Also identifies product mentions that could have affiliate links.',
+    description: 'Scan article content for Amazon product URLs and add affiliate tags.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -140,7 +148,7 @@ const TOOLS = [
       properties: {
         title: { type: 'string', description: 'Article title' },
         content: { type: 'string', description: 'Article content (markdown)' },
-        site: { type: 'string', description: 'Site slug to find related articles for internal linking' },
+        site: { type: 'string', description: 'Site slug for internal linking' },
         author: { type: 'string', description: 'Author name' },
         featured_image: { type: 'string', description: 'Featured image URL' },
       },
@@ -149,39 +157,31 @@ const TOOLS = [
   },
   {
     name: 'publish_article',
-    description: 'Publish an article to the CMS. Handles slug generation, metadata, and category assignment.',
+    description: 'Publish an article to the CMS.',
     inputSchema: {
       type: 'object',
       properties: {
-        site: { type: 'string', description: 'Site slug (e.g. "recipe", "outdoor")' },
+        site: { type: 'string', description: 'Site slug' },
         title: { type: 'string', description: 'Article title' },
         content: { type: 'string', description: 'Full article content (markdown)' },
         category: { type: 'string', description: 'Category name' },
-        tags: {
-          type: 'array',
-          items: { type: 'string' },
-          description: 'Tags for the article',
-        },
-        meta_description: { type: 'string', description: 'SEO meta description (auto-generated if omitted)' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Tags' },
+        meta_description: { type: 'string', description: 'SEO meta description' },
         featured_image: { type: 'string', description: 'Featured image URL' },
         author: { type: 'string', description: 'Author name' },
-        status: {
-          type: 'string',
-          enum: ['draft', 'published'],
-          description: 'Publication status (default: published)',
-        },
+        status: { type: 'string', enum: ['draft', 'published'], description: 'Status (default: published)' },
       },
       required: ['site', 'title', 'content'],
     },
   },
   {
     name: 'get_existing_articles',
-    description: 'Get existing articles for a site to avoid duplicates and find internal linking opportunities.',
+    description: 'Get existing articles for a site.',
     inputSchema: {
       type: 'object',
       properties: {
         site: { type: 'string', description: 'Site slug' },
-        limit: { type: 'number', description: 'Max articles to return (default 50)' },
+        limit: { type: 'number', description: 'Max articles (default 50)' },
       },
       required: ['site'],
     },
@@ -198,150 +198,181 @@ async function handleTool(name, args) {
       for (const site of sites) {
         const cats = await cmsRequest(`/api/categories?site=${site.slug}`);
         result.push({
-          id: site.id,
-          name: site.name,
-          slug: site.slug,
-          domain: site.domain,
+          id: site.id, name: site.name, slug: site.slug, domain: site.domain,
           categories: cats.map(c => ({ id: c.id, name: c.name, slug: c.slug })),
         });
       }
       return result;
     }
-
-    case 'source_images': {
+    case 'source_images':
       return searchPexels(args.query, args.count || 3);
-    }
-
     case 'enrich_links': {
       const enriched = enrichAffiliateLinks(args.content, args.tag || AMAZON_TAG);
-      const changed = enriched !== args.content;
-      return { content: enriched, linksEnriched: changed };
+      return { content: enriched, linksEnriched: enriched !== args.content };
     }
-
     case 'seo_metadata': {
       const slug = generateSlug(args.title);
       const meta = args.meta_description || generateMetaDescription(args.title, args.content);
       const schema = generateSchemaMarkup({
-        title: args.title,
-        meta_description: meta,
-        featured_image: args.featured_image || '',
-        author: args.author || 'Editorial Team',
+        title: args.title, meta_description: meta,
+        featured_image: args.featured_image || '', author: args.author || 'Editorial Team',
         site_name: args.site || 'ContentForge',
       });
-
-      // Find related articles for internal linking
       let relatedArticles = [];
       if (args.site) {
         try {
           const articles = await cmsRequest(`/api/articles?site=${args.site}&status=published&limit=20`);
           if (Array.isArray(articles)) {
-            relatedArticles = articles
-              .filter(a => a.slug !== slug)
-              .slice(0, 5)
-              .map(a => ({ title: a.title, slug: a.slug }));
+            relatedArticles = articles.filter(a => a.slug !== slug).slice(0, 5).map(a => ({ title: a.title, slug: a.slug }));
           }
         } catch (e) { /* ignore */ }
       }
-
       return { slug, meta_description: meta, schema_markup: schema, suggested_internal_links: relatedArticles };
     }
-
     case 'publish_article': {
       const slug = generateSlug(args.title);
       const meta = args.meta_description || generateMetaDescription(args.title, args.content);
       const content = enrichAffiliateLinks(args.content, AMAZON_TAG);
-
-      // Get site ID
       const sites = await cmsRequest('/api/sites');
       const site = sites.find(s => s.slug === args.site);
       if (!site) return { error: `Site "${args.site}" not found` };
-
-      // Find or create category
       let categoryId = null;
       if (args.category) {
         const cats = await cmsRequest(`/api/categories?site=${args.site}`);
         const cat = cats.find(c => c.name.toLowerCase() === args.category.toLowerCase());
-        if (cat) {
-          categoryId = cat.id;
-        } else {
+        if (cat) { categoryId = cat.id; }
+        else {
           const newCat = await cmsRequest('/api/categories', {
-            method: 'POST',
-            body: JSON.stringify({
-              site_id: site.id,
-              name: args.category,
-              slug: generateSlug(args.category),
-            }),
+            method: 'POST', body: JSON.stringify({ site_id: site.id, name: args.category, slug: generateSlug(args.category) }),
           });
           categoryId = newCat.id;
         }
       }
-
       const article = await cmsRequest('/api/articles', {
-        method: 'POST',
-        body: JSON.stringify({
-          site_id: site.id,
-          title: args.title,
-          slug,
-          content,
-          category_id: categoryId,
-          tags: args.tags || [],
-          meta_description: meta,
-          featured_image: args.featured_image || '',
-          author: args.author || 'Editorial Team',
-          status: args.status || 'published',
+        method: 'POST', body: JSON.stringify({
+          site_id: site.id, title: args.title, slug, content, category_id: categoryId,
+          tags: args.tags || [], meta_description: meta, featured_image: args.featured_image || '',
+          author: args.author || 'Editorial Team', status: args.status || 'published',
         }),
       });
-
       return { success: true, article };
     }
-
     case 'get_existing_articles': {
-      const articles = await cmsRequest(
-        `/api/articles?site=${args.site}&limit=${args.limit || 50}`
-      );
+      const articles = await cmsRequest(`/api/articles?site=${args.site}&limit=${args.limit || 50}`);
       if (!Array.isArray(articles)) return { error: 'Failed to fetch articles', raw: articles };
-      return articles.map(a => ({
-        id: a.id,
-        title: a.title,
-        slug: a.slug,
-        category: a.category_name,
-        status: a.status,
-        created: a.created_at,
-      }));
+      return articles.map(a => ({ id: a.id, title: a.title, slug: a.slug, category: a.category_name, status: a.status, created: a.created_at }));
     }
-
     default:
       return { error: `Unknown tool: ${name}` };
   }
 }
 
-// ---- MCP Setup ----
+// ---- MCP Server Factory ----
 
-server.setRequestHandler(ListToolsRequestSchema, async () => ({
-  tools: TOOLS,
-}));
+function createServer() {
+  const srv = new Server(
+    { name: 'contentforge', version: '0.1.0' },
+    { capabilities: { tools: {} } }
+  );
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const { name, arguments: args } = request.params;
-  try {
-    const result = await handleTool(name, args || {});
-    return {
-      content: [{ type: 'text', text: JSON.stringify(result, null, 2) }],
-    };
-  } catch (error) {
-    return {
-      content: [{ type: 'text', text: `Error: ${error.message}` }],
-      isError: true,
-    };
+  srv.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
+
+  srv.setRequestHandler(CallToolRequestSchema, async (request) => {
+    const { name, arguments: args } = request.params;
+    logUsage(name, srv._currentApiKey || null);
+    try {
+      const result = await handleTool(name, args || {});
+      return { content: [{ type: 'text', text: JSON.stringify(result, null, 2) }] };
+    } catch (error) {
+      return { content: [{ type: 'text', text: `Error: ${error.message}` }], isError: true };
+    }
+  });
+
+  return srv;
+}
+
+// ---- HTTP/SSE Mode ----
+
+function startHttpServer() {
+  const app = express();
+  app.use(express.json());
+
+  // Health check (no auth)
+  app.get('/health', (req, res) => {
+    res.json({ status: 'ok', server: 'contentforge', version: '0.1.0' });
+  });
+
+  // Auth middleware for MCP endpoints
+  function authMiddleware(req, res, next) {
+    const key = req.headers['x-api-key'];
+    if (!API_KEY) { next(); return; } // no key configured = open
+    if (key !== API_KEY) {
+      res.status(401).json({ error: 'Invalid or missing API key' });
+      return;
+    }
+    if (!checkRateLimit(key)) {
+      res.status(429).json({ error: 'Rate limit exceeded (100 req/hr)' });
+      return;
+    }
+    req.apiKey = key;
+    next();
   }
-});
 
-// ---- Start ----
+  const transports = {};
 
-async function main() {
+  // SSE endpoint
+  app.get('/sse', authMiddleware, async (req, res) => {
+    console.log('SSE connection requested');
+    try {
+      const transport = new SSEServerTransport('/messages', res);
+      const sessionId = transport.sessionId;
+      transports[sessionId] = transport;
+      transport.onclose = () => {
+        console.log(`SSE closed: ${sessionId}`);
+        delete transports[sessionId];
+      };
+      const server = createServer();
+      server._currentApiKey = req.apiKey || null;
+      await server.connect(transport);
+      console.log(`SSE established: ${sessionId}`);
+    } catch (error) {
+      console.error('SSE error:', error);
+      if (!res.headersSent) res.status(500).send('Error establishing SSE stream');
+    }
+  });
+
+  // Messages endpoint
+  app.post('/messages', authMiddleware, async (req, res) => {
+    const sessionId = req.query.sessionId;
+    if (!sessionId) { res.status(400).json({ error: 'Missing sessionId' }); return; }
+    const transport = transports[sessionId];
+    if (!transport) { res.status(404).json({ error: 'Session not found' }); return; }
+    try {
+      await transport.handlePostMessage(req, res, req.body);
+    } catch (error) {
+      console.error('Message error:', error);
+      if (!res.headersSent) res.status(500).json({ error: 'Internal error' });
+    }
+  });
+
+  app.listen(PORT, () => {
+    console.log(`ContentForge HTTP/SSE server listening on port ${PORT}`);
+  });
+}
+
+// ---- Stdio Mode ----
+
+async function startStdio() {
+  const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('ContentForge MCP server running on stdio');
 }
 
-main().catch(console.error);
+// ---- Main ----
+
+if (process.argv.includes('--stdio')) {
+  startStdio().catch(console.error);
+} else {
+  startHttpServer();
+}
