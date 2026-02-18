@@ -1,12 +1,17 @@
 {
-  "name": "contentforge",
+  "name": "@gentry-ai-bot/contentforge",
   "version": "0.1.0",
-  "description": "Content pipeline MCP server — topic to publish-ready article",
+  "description": "Content pipeline MCP server — topic research, image sourcing, SEO metadata, affiliate links, and CMS publishing",
   "type": "module",
   "main": "src/index.js",
   "bin": {
     "contentforge": "./src/index.js"
   },
+  "files": [
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
   "scripts": {
     "start": "node src/index.js",
     "start:stdio": "node src/index.js --stdio",
@@ -14,12 +19,33 @@
   },
   "keywords": [
     "mcp",
+    "model-context-protocol",
     "content",
     "seo",
     "publishing",
-    "cms"
+    "cms",
+    "ai",
+    "llm",
+    "affiliate",
+    "pexels",
+    "content-pipeline"
   ],
+  "author": "Gentry AI <gentry.ai.bot@gmail.com>",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gentry-ai-bot/contentforge.git"
+  },
+  "homepage": "https://github.com/gentry-ai-bot/contentforge#readme",
+  "bugs": {
+    "url": "https://github.com/gentry-ai-bot/contentforge/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "express": "^5.2.1"
